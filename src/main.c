@@ -13,22 +13,22 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#include "debug.h"
+
 #define SERIAL_ADDR 0x3f8
 #define OFF_SETUP_HEADER 0x01f1
 
-void get_regs(int vcpufd, struct kvm_regs *regs) {
-  ioctl(vcpufd, KVM_GET_REGS, &regs);
-}
-
 void print_rip(int vcpufd) {
   struct kvm_regs regs;
-  get_regs(vcpufd, &regs);
+  ioctl(vcpufd, KVM_GET_REGS, &regs);
   printf("rip: 0x%llx\n", regs.rip);
 }
 
 void main_loop(int vcpufd, struct kvm_run *run) {
   while (1) {
     int ret = ioctl(vcpufd, KVM_RUN, NULL);
+    print_rip(vcpufd);
+    printf("ret: %d\n", ret);
     if (ret == -1)
       err(1, "KVM_RUN");
     switch (run->exit_reason) {
@@ -46,7 +46,7 @@ void main_loop(int vcpufd, struct kvm_run *run) {
       errx(1, "KVM_EXIT_FAIL_ENTRY: hardware_entry_failure_reason = 0x%llx",
            (unsigned long long)run->fail_entry.hardware_entry_failure_reason);
     case KVM_EXIT_INTERNAL_ERROR:
-      printf("rip: 0x%llx\n", run->tpr_access.rip);
+      printf("tpr_acces.rip: 0x%llx\n", run->tpr_access.rip);
       errx(1, "KVM_EXIT_INTERNAL_ERROR: suberror = 0x%x",
            run->internal.suberror);
     default:
@@ -71,7 +71,7 @@ int main(void) {
   if (vmfd == -1)
     err(1, "KVM_CREATE_VM");
 
-  int imagefd = open("image/bzImage", O_RDWR);
+  int imagefd = open("test-image/bzImage", O_RDWR);
   if (imagefd == -1)
     err(1, "open bzImage failed");
 
@@ -108,6 +108,11 @@ int main(void) {
   run = mmap(NULL, mmap_size, PROT_READ | PROT_WRITE, MAP_SHARED, vcpufd, 0);
   if (!run)
     err(1, "mmap vcpu");
+
+  csh *handle_32 = get_dissambler_32();
+  disas(*handle_32, run, (char*)run + 2);
+
+  
 
   ret = ioctl(vcpufd, KVM_GET_SREGS, &sregs);
   if (ret == -1)
