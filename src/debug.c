@@ -30,3 +30,10 @@ void disas(csh handle, void *beg, void *end)
    }
    cs_free(insn, count);
 }
+
+void print_rip(int vcpufd)
+{
+  struct kvm_regs regs;
+  ioctl(vcpufd, KVM_GET_REGS, &regs);
+  printf("rip: 0x%llx\n", regs.rip);
+}
