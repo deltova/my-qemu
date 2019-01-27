@@ -16,31 +16,13 @@
 #include <sys/types.h>
 
 #include "debug.h"
-
-#define DEFAULT_CMDLINE "console=ttyS0 earlyprintk=serial nokaslr"
-#define BOOT_PARAM_ADDR 0x6000
-#define CMDLINE_ADDR	BOOT_PARAM_ADDR + 0x10000
-#define SERIAL_ADDR 0x3f8
-#define OFF_SETUP_HEADER 0x01f1
-#define RAM_SIZE 1 << 30
-#define KERNEL_START 0x100000
-#define STACK_ADRR 0x400000
-
-static void dump_io(struct kvm_run *run)
-{
-  char *direction;
-  if (run->io.direction == KVM_EXIT_IO_IN)
-    direction = "IN";
-  else
-    direction = "OUT";
-  printf("io: dir: %s port: %u size: %u off: %llu\n",
-      direction, run->io.port, run->io.size, run->io.data_offset);
-}
+#include "serial.h"
+#include "constant.h"
 
 void main_loop(int vcpufd, struct kvm_run *run, char *begin_addr_space) {
   struct kvm_regs regs;
-  size_t nb_instr = 0;
   struct kvm_sregs sregs;
+  uint16_t port;
   //csh *handle = get_dissambler_32();
   (void)begin_addr_space;
   ioctl(vcpufd, KVM_GET_REGS, &regs);
@@ -57,16 +39,22 @@ void main_loop(int vcpufd, struct kvm_run *run, char *begin_addr_space) {
         puts("KVM_EXIT_HLT");
         return;
       case KVM_EXIT_IO:
-        puts("KVM_EXIT_IO\n");
-        if (run->io.direction == KVM_EXIT_IO_OUT && run->io.size == 1 &&
-            run->io.port == SERIAL_ADDR && run->io.count == 1)
-          putchar(*(((char *)run) + run->io.data_offset));
+        port = run->io.port;
+        if (port == RBR || port == IER || port == IIR || port == LCR
+            || port == LSR || port == MCR)
+          handle_serial_io(run);   
+        else if (port == 0x61 || port == 0x43 || port == 0x42 || port == 0xcf8
+                || port == 0xcfc || port == 0xcfe || port == 0xa1 || port == 0x21
+                || port == 0x70 || port == 0x71 || port == 0x80 || port == 0x40)
+          (void)port;
         else
         {
           dump_io(run);
-          printf("nb-instr: %lu\n", nb_instr);
           errx(1, "unhandled KVM_EXIT_IO");
         }
+        break;
+      case KVM_EXIT_MMIO:
+        
         break;
       case KVM_EXIT_FAIL_ENTRY:
         errx(1, "KVM_EXIT_FAIL_ENTRY: hardware_entry_failure_reason = 0x%llx",
@@ -76,7 +64,6 @@ void main_loop(int vcpufd, struct kvm_run *run, char *begin_addr_space) {
         errx(1, "KVM_EXIT_INTERNAL_ERROR: suberror = 0x%x",
             run->internal.suberror);
       case KVM_EXIT_DEBUG:
-        nb_instr++;
         //kvm_debug_dump(vcpufd, DEBUG_COMPLETE);
         //disas(*handle, begin_addr_space + regs.rip , begin_addr_space + regs.rip + 70, 10); 
         break;
@@ -247,10 +234,7 @@ static void setup_cpuid(int vcpufd)
   cpuid_info.a.entries[1].eax = 0x400;
   cpuid_info.a.entries[1].ebx = 0;
   cpuid_info.a.entries[1].ecx = 0;
-  cpuid_info.a.entries[1].edx = 0x701b179; /* SSE2, SSE, FXSR, PAT,
-           CMOV, PGE, MTRR, CX8,
-           PAE, MSR, TSC, PSE,
-           FPU */
+  cpuid_info.a.entries[1].edx = 0x701b179;
   cpuid_info.a.entries[2].function = 0x80000000;
   cpuid_info.a.entries[2].eax = 0x80000001;
   cpuid_info.a.entries[2].ebx = 0;
@@ -260,51 +244,78 @@ static void setup_cpuid(int vcpufd)
   cpuid_info.a.entries[3].eax = 0;
   cpuid_info.a.entries[3].ebx = 0;
   cpuid_info.a.entries[3].ecx = 0;
-  cpuid_info.a.entries[3].edx = 0x20100800; /* AMD64, NX, SYSCALL */
+  cpuid_info.a.entries[3].edx = 0x20100800; 
   if (ioctl (vcpufd, KVM_SET_CPUID, &cpuid_info.a) < 0)
     err (1, "KVM_SET_CPUID failed");
 
 }
 
-int main(void) {
-  int kvm, vmfd, vcpufd, ret;
+static void activate_single_step(int vcpufd)
+{
+  int ret;
+  struct kvm_guest_debug guest_debug;
+  memset(&guest_debug, 0, sizeof(struct kvm_guest_debug));
+  guest_debug.control |= KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_SINGLESTEP;
+  guest_debug.control |= KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_USE_SW_BP;
+
+
+  ret = ioctl(vcpufd, KVM_SET_GUEST_DEBUG, &guest_debug);
+  if (ret == -1)
+    err(1, "KVM_CAP_SET_GUEST_DEBUG");
+
+}
+
+static int create_vm(size_t *mmap_size)
+{
+  int kvm = open("/dev/kvm", O_RDWR | O_CLOEXEC);
+  if (kvm == -1)
+    err(1, "/dev/kvm");
+
+  int ret = ioctl(kvm, KVM_GET_VCPU_MMAP_SIZE, NULL);
+  if (ret == -1)
+    err(1, "KVM_GET_VCPU_MMAP_SIZE");
+  *mmap_size = ret;
+
+  int vmfd = ioctl(kvm, KVM_CREATE_VM, (unsigned long)0);
+  if (vmfd == -1)
+    err(1, "KVM_CREATE_VM");
+  return vmfd;
+}
+
+int main(int argc, char **argv) {
+  int vcpufd, ret;
   struct kvm_sregs sregs;
   size_t mmap_size;
   struct kvm_run *run;
   // struct boot_params parameter;
+  if (argc == 1)
+  {
+    fprintf(stderr, "Missing Argument\n");
+    return 1;
+  }
 
-  kvm = open("/dev/kvm", O_RDWR | O_CLOEXEC);
-  if (kvm == -1)
-    err(1, "/dev/kvm");
-
-  vmfd = ioctl(kvm, KVM_CREATE_VM, (unsigned long)0);
-  if (vmfd == -1)
-    err(1, "KVM_CREATE_VM");
-
-  void *ram_addr = load_bzImage("test-image/bzImage", vmfd);
+  int vmfd = create_vm(&mmap_size);
 
   vcpufd = ioctl(vmfd, KVM_CREATE_VCPU, (unsigned long)0);
   if (vcpufd == -1)
     err(1, "KVM_CREATE_VCPU");
 
-  ret = ioctl(kvm, KVM_GET_VCPU_MMAP_SIZE, NULL);
-  if (ret == -1)
-    err(1, "KVM_GET_VCPU_MMAP_SIZE");
+  setup_cpuid(vcpufd);
 
-  mmap_size = ret;
   if (mmap_size < sizeof(*run))
     errx(1, "KVM_GET_VCPU_MMAP_SIZE unexpectedly small");
+
   run = mmap(NULL, mmap_size, PROT_READ | PROT_WRITE, MAP_SHARED, vcpufd, 0);
   if (!run)
     err(1, "mmap vcpu");
+
+  void *ram_addr = load_bzImage(argv[1], vmfd);
 
   ret = ioctl(vcpufd, KVM_GET_SREGS, &sregs);
   if (ret == -1)
     err(1, "KVM_GET_SREGS");
 
   setup_protected_mode(&sregs);
-  //sregs.cr4 = 0x1000;
-  setup_cpuid(vcpufd);
 
   ret = ioctl(vcpufd, KVM_SET_SREGS, &sregs);
   if (ret == -1)
@@ -318,21 +329,9 @@ int main(void) {
     .rdi = 0,
     .rbx = 0,
   };
-  regs.rflags = 0x2;
-  regs.rflags |= 0x3000;
-  regs.rflags |= 0x00200000;
   ret = ioctl(vcpufd, KVM_SET_REGS, &regs);
 
-  // Debug mode
-  struct kvm_guest_debug guest_debug;
-  memset(&guest_debug, 0, sizeof(struct kvm_guest_debug));
-  guest_debug.control |= KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_SINGLESTEP;
-  guest_debug.control |= KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_USE_SW_BP;
-
-
-  ret = ioctl(vcpufd, KVM_SET_GUEST_DEBUG, &guest_debug);
-  if (ret == -1)
-    err(1, "KVM_CAP_SET_GUEST_DEBUG");
+  activate_single_step(vcpufd);
 
   main_loop(vcpufd, run, ram_addr);
 }

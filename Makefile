@@ -2,7 +2,7 @@ CC=gcc
 CFLAGS=-Werror -Wextra -std=c99 -Wall -g
 LDFLAGS=-lcapstone
 VPATH=src
-OBJS=main.o debug.o
+OBJS=main.o debug.o serial.o
 BIN=my-kvm
 
 $(BIN): $(OBJS)
