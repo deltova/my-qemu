@@ -1,0 +1,12 @@
+#ifndef CONSTANT_H
+#define CONSTANT_H
+
+#define DEFAULT_CMDLINE "console=ttyS0"
+#define BOOT_PARAM_ADDR 0x6000
+#define CMDLINE_ADDR	BOOT_PARAM_ADDR + 0x10000
+#define OFF_SETUP_HEADER 0x01f1
+#define RAM_SIZE 1 << 30
+#define KERNEL_START 0x100000
+#define STACK_ADRR 0x400000
+
+#endif

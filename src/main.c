@@ -23,13 +23,11 @@ void main_loop(int vcpufd, struct kvm_run *run, char *begin_addr_space) {
   struct kvm_regs regs;
   struct kvm_sregs sregs;
   uint16_t port;
-  //csh *handle = get_dissambler_32();
   (void)begin_addr_space;
   ioctl(vcpufd, KVM_GET_REGS, &regs);
   kvm_debug_dump(vcpufd, DEBUG_COMPLETE);
   while (1) {
     int ret = ioctl(vcpufd, KVM_RUN, NULL);
-    //kvm_debug_dump(vcpufd);
     ioctl(vcpufd, KVM_GET_REGS, &regs);
     ioctl(vcpufd, KVM_GET_SREGS, &sregs);
     if (ret == -1)
@@ -41,7 +39,7 @@ void main_loop(int vcpufd, struct kvm_run *run, char *begin_addr_space) {
       case KVM_EXIT_IO:
         port = run->io.port;
         if (port == RBR || port == IER || port == IIR || port == LCR
-            || port == LSR || port == MCR)
+            || port == LSR || port == MCR || MSR == port)
           handle_serial_io(run);   
         else if (port == 0x61 || port == 0x43 || port == 0x42 || port == 0xcf8
                 || port == 0xcfc || port == 0xcfe || port == 0xa1 || port == 0x21
@@ -49,12 +47,14 @@ void main_loop(int vcpufd, struct kvm_run *run, char *begin_addr_space) {
           (void)port;
         else
         {
-          dump_io(run);
-          errx(1, "unhandled KVM_EXIT_IO");
+          //dump_io(run);
+          //errx(1, "unhandled KVM_EXIT_IO");
         }
         break;
       case KVM_EXIT_MMIO:
         
+        printf("MMIO: physaddr = 0x%llx\n", run->mmio.phys_addr);
+        //disas(*handle, (void*)(regs.rip), (void*)(regs.rip + 10), 2); 
         break;
       case KVM_EXIT_FAIL_ENTRY:
         errx(1, "KVM_EXIT_FAIL_ENTRY: hardware_entry_failure_reason = 0x%llx",
@@ -64,8 +64,6 @@ void main_loop(int vcpufd, struct kvm_run *run, char *begin_addr_space) {
         errx(1, "KVM_EXIT_INTERNAL_ERROR: suberror = 0x%x",
             run->internal.suberror);
       case KVM_EXIT_DEBUG:
-        //kvm_debug_dump(vcpufd, DEBUG_COMPLETE);
-        //disas(*handle, begin_addr_space + regs.rip , begin_addr_space + regs.rip + 70, 10); 
         break;
       default:
         puts("OTHER\n");
@@ -116,12 +114,13 @@ static void write_boot_param(struct setup_header *setup_header, void *end_setup_
   if (bt_param->hdr.setup_sects == 0)
     bt_param->hdr.setup_sects = 4;
 
+  bt_param->hdr.type_of_loader = 0xff;
   //Setup Load flags
+  bt_param->hdr.loadflags = 0;
   bt_param->hdr.loadflags |= KEEP_SEGMENTS; //do not reload seg
-  bt_param->hdr.loadflags |= LOADED_HIGH; //do not reload seg
 
 	bt_param->hdr.loadflags &= ~QUIET_FLAG; // Print early messages
-	bt_param->hdr.loadflags &= ~CAN_USE_HEAP; // heap_ptr is not valid
+	bt_param->hdr.loadflags &= ~CAN_USE_HEAP; // heap_ptr is not valid*/
 
 	init_e820_table(bt_param);
 
@@ -146,18 +145,10 @@ static void *setup_memory(int vmfd)
   int ret = ioctl(vmfd, KVM_SET_USER_MEMORY_REGION, &region);
   if (ret == -1)
     err(1, "KVM_SET_USER_MEMORY_REGION");
-  struct kvm_userspace_memory_region memregion2;
-  memregion2.slot = 1;
-  memregion2.flags = 0;
-  memregion2.guest_phys_addr = 0xfffff000;
-  memregion2.userspace_addr = region.userspace_addr + 0xff000;
-  memregion2.memory_size = 0x1000;
-  if (ioctl (vmfd, KVM_SET_USER_MEMORY_REGION, &memregion2))
-    errx(1, "KVM_SET_USER_MEMORY_REGION failed (for 0xfffff000)");
   return ram;
 }
 
-static void *load_bzImage(const char *image, int vmfd)
+static void *load_bzImage(const char *image, int vmfd, size_t *kernel_size)
 {
   int imagefd = open(image, O_RDWR);
   if (imagefd == -1)
@@ -184,9 +175,9 @@ static void *load_bzImage(const char *image, int vmfd)
   void *end_setup_header = mem + 0x0202 +  *((char*)mem + 0x0201);
   write_boot_param(setup_header, end_setup_header, ram_addr);
   //write kernel
-  size_t kernel_size = image_size - off_kernel; 
+  *kernel_size = image_size - off_kernel; 
 
-  memcpy(ram_addr + KERNEL_START, mem + off_kernel, kernel_size);
+  memcpy(ram_addr + KERNEL_START, mem + off_kernel, *kernel_size);
   return ram_addr;
 }
 
@@ -205,7 +196,6 @@ static void setup_protected_mode(struct kvm_sregs *sregs)
     .g = 1,
   };
 
-
   sregs->cs = seg;
 
   seg.type = 3; /* Data: read/write, accessed */
@@ -213,9 +203,9 @@ static void setup_protected_mode(struct kvm_sregs *sregs)
   sregs->ds = sregs->es = sregs->ss = seg;
 
   sregs->cr0 |= X86_CR0_PE;
-  sregs->cr0 &= ~X86_CR0_PG;
-  sregs->cr4 &= ~X86_CR4_PAE;
-  sregs->cr4 &= ~X86_CR4_PVI;
+
+  //disable paging
+  sregs->cr4 &= ~(1U << 5);
 }
 
 static void setup_cpuid(int vcpufd)
@@ -282,19 +272,53 @@ static int create_vm(size_t *mmap_size)
   return vmfd;
 }
 
+static void load_initramfs(char *initramfs, uint8_t *ram_begin, size_t kernel_size)
+{
+  int imagefd = open(initramfs, O_RDWR);
+  if (imagefd == -1)
+    err(1, "open bzImage failed");
+
+  struct stat statbuf;
+  fstat(imagefd, &statbuf);
+  size_t image_size = statbuf.st_size;
+
+  uint8_t *init = mmap(NULL, image_size, PROT_READ | PROT_WRITE, MAP_SHARED, imagefd,
+      0);
+  if (init == MAP_FAILED)
+    errx(1, "load image failed");
+
+  memcpy(ram_begin + kernel_size + KERNEL_START, init, statbuf.st_size);
+  struct boot_params *bt_param = (struct boot_params*)(ram_begin + BOOT_PARAM_ADDR);
+  struct setup_header *setup_header = &(bt_param->hdr);
+  
+  setup_header->ramdisk_image = (uint64_t)(kernel_size + KERNEL_START);
+  setup_header->ramdisk_size = statbuf.st_size;
+}
+
 int main(int argc, char **argv) {
   int vcpufd, ret;
   struct kvm_sregs sregs;
   size_t mmap_size;
   struct kvm_run *run;
   // struct boot_params parameter;
-  if (argc == 1)
+  if (argc != 3)
   {
     fprintf(stderr, "Missing Argument\n");
     return 1;
   }
 
   int vmfd = create_vm(&mmap_size);
+
+  struct kvm_pit_config pit_conf;
+  pit_conf.flags = 0;
+  ret = ioctl(vmfd, KVM_CREATE_PIT2, &pit_conf);
+  if (ret == -1)
+    err(1, "KVM_CREATE_PIT2");
+
+  ret = ioctl(vmfd, KVM_CREATE_IRQCHIP, 0);
+  if (ret == -1)
+    err(1, "KVM_CREATE_IRQCHIP");
+
 
   vcpufd = ioctl(vmfd, KVM_CREATE_VCPU, (unsigned long)0);
   if (vcpufd == -1)
@@ -309,7 +333,9 @@ int main(int argc, char **argv) {
   if (!run)
     err(1, "mmap vcpu");
 
-  void *ram_addr = load_bzImage(argv[1], vmfd);
+  size_t kernel_size;
+  void *ram_addr = load_bzImage(argv[1], vmfd, &kernel_size);
+  load_initramfs(argv[2], ram_addr, kernel_size);
 
   ret = ioctl(vcpufd, KVM_GET_SREGS, &sregs);
   if (ret == -1)
