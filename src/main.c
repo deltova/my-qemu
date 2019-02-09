@@ -14,10 +14,13 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
+#include <getopt.h>
 
 #include "debug.h"
 #include "serial.h"
 #include "constant.h"
+static char *cmdline = NULL;
 
 void main_loop(int vcpufd, struct kvm_run *run, char *begin_addr_space) {
   struct kvm_regs regs;
@@ -126,12 +129,12 @@ static void write_boot_param(struct setup_header *setup_header, void *end_setup_
 
   //setup kernel Command Line
   bt_param->hdr.cmd_line_ptr = CMDLINE_ADDR;
-  memcpy(ram_addr + CMDLINE_ADDR, DEFAULT_CMDLINE, strlen(DEFAULT_CMDLINE) + 1);
+  memcpy(ram_addr + CMDLINE_ADDR, cmdline, strlen(cmdline));
 }
 
-static void *setup_memory(int vmfd)
+static void *setup_memory(int vmfd, size_t ram_size)
 {
-  void *ram = mmap(NULL, RAM_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+  void *ram = mmap(NULL, ram_size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
   if (ram == MAP_FAILED)
   {
     errx(1, "mmap failed");
@@ -148,7 +151,8 @@ static void *setup_memory(int vmfd)
   return ram;
 }
 
-static void *load_bzImage(const char *image, int vmfd, size_t *kernel_size)
+static void *load_bzImage(const char *image, int vmfd, size_t *kernel_size,
+    size_t ram_size)
 {
   int imagefd = open(image, O_RDWR);
   if (imagefd == -1)
@@ -171,7 +175,7 @@ static void *load_bzImage(const char *image, int vmfd, size_t *kernel_size)
   uint64_t off_kernel = get_kernel_off(setup_header);
 
   
-  char *ram_addr = setup_memory(vmfd);
+  char *ram_addr = setup_memory(vmfd, ram_size);
   void *end_setup_header = mem + 0x0202 +  *((char*)mem + 0x0201);
   write_boot_param(setup_header, end_setup_header, ram_addr);
   //write kernel
@@ -295,17 +299,73 @@ static void load_initramfs(char *initramfs, uint8_t *ram_begin, size_t kernel_si
   setup_header->ramdisk_size = statbuf.st_size;
 }
 
+void parse_param(int argc, char **argv, char **bzimage_path,
+    char **initrd_path, size_t *ram_disk)
+{
+  static struct option long_options[] =
+  {
+    {"h",       no_argument,       0, 'h'},
+    {"initrd",  required_argument, 0, 'i'},
+    {"m",       required_argument, 0, 'm'},
+    {0, 0, 0, 0}
+  };
+  size_t ram_size = RAM_SIZE;
+  char *initrd = NULL;
+  int c;
+  int option_index = 0;
+  do
+  {
+    c = getopt_long (argc, argv, "hm:i:", long_options, &option_index);
+    switch (c)
+    {
+      case 0:
+        if (long_options[option_index].flag != 0)
+          break;
+        printf("option %s", long_options[option_index].name);
+        if (optarg)
+          printf(" with arg %s", optarg);
+        printf("\n");
+        break;
+      case 'h':
+        puts ("-m $ram_size\n --initrd initrd_path\n -h helper\n");
+        exit(0);
+        break;
+      case 'i':
+        initrd = optarg;
+        break;
+      case 'm':
+        ram_size = atol(optarg);
+        break;
+
+      default:
+        break;
+    }
+  }
+  while (c != -1);
+  cmdline = DEFAULT_CMDLINE;
+  if (optind < argc)
+  {
+    if (optind == argc)
+      errx(1, "need to add a bzImage\n");
+    *bzimage_path = argv[optind++];
+    for (;optind < argc; optind++)
+    {
+      asprintf(&cmdline, "%s %s", cmdline, argv[optind]);
+    }
+  }
+  *initrd_path = initrd;
+  *ram_disk = ram_size;
+}
+
 int main(int argc, char **argv) {
   int vcpufd, ret;
   struct kvm_sregs sregs;
   size_t mmap_size;
   struct kvm_run *run;
-  // struct boot_params parameter;
-  if (argc != 3)
-  {
-    fprintf(stderr, "Missing Argument\n");
-    return 1;
-  }
+  char *bzimage_path;
+  char *initrd_path;
+  size_t ram_size;
+  parse_param(argc, argv, &bzimage_path, &initrd_path, &ram_size);
 
   int vmfd = create_vm(&mmap_size);
 
@@ -334,8 +394,9 @@ int main(int argc, char **argv) {
     err(1, "mmap vcpu");
 
   size_t kernel_size;
-  void *ram_addr = load_bzImage(argv[1], vmfd, &kernel_size);
-  load_initramfs(argv[2], ram_addr, kernel_size);
+  void *ram_addr = load_bzImage(bzimage_path, vmfd, &kernel_size, ram_size);
+  if (initrd_path != NULL)
+    load_initramfs(initrd_path, ram_addr, kernel_size);
 
   ret = ioctl(vcpufd, KVM_GET_SREGS, &sregs);
   if (ret == -1)
