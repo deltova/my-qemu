@@ -109,9 +109,9 @@ void handle_in(struct kvm_run *run)
       *reg = 0;
       return;
     }
-    uint8_t *reg = (uint8_t*)run + run->io.data_offset;
-    *reg = getchar();
-    line_status &= ~1;
+    //uint8_t *reg = (uint8_t*)run + run->io.data_offset;
+    //*reg = getchar();
+    //line_status &= ~1;
   }
   else if (run->io.port == IER)
   {
@@ -129,7 +129,7 @@ void handle_in(struct kvm_run *run)
   else if (run->io.port == IIR)
   {
     uint8_t *reg = (uint8_t*)run + run->io.data_offset;
-    *reg = interrupt_identification | UART_IIR_TYPE_BITS;
+    *reg = 0;//interrupt_identification | UART_IIR_TYPE_BITS;
   }
   else if (run->io.port == LCR) 
   {
