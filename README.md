@@ -31,7 +31,9 @@ Launch it:
 ```
 
 -m Set the size of the Vm's RAM it is optional the default size is 1 << 30
+
 --initrd get the path of the initrd image it is optional
+
 You can give some kernel command line argument after the bzImage
 
 
