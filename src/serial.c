@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <err.h>
+#include <string>
 
 #include "serial.h"
 
@@ -17,13 +18,13 @@ static uint8_t scr = 0;
 
 void dump_io(struct kvm_run *run)
 {
-  char *direction;
+  std::string direction;
   if (run->io.direction == KVM_EXIT_IO_IN)
     direction = "IN";
   else
     direction = "OUT";
   printf("io: dir: %s port: 0x%x size: %u off: %llu count: %u\n",
-      direction, run->io.port, run->io.size, run->io.data_offset, run->io.count);
+      direction.c_str(), run->io.port, run->io.size, run->io.data_offset, run->io.count);
 }
 
 void handle_out(struct kvm_run *run)

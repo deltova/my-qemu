@@ -1,6 +1,7 @@
 #include "debug.h"
 #include <err.h>
 #include <ctype.h>
+#include <iostream>
 
 #define get_dissambler(MODE) \
    csh *get_dissambler_##MODE() \
@@ -8,7 +9,7 @@
     static csh *handle = NULL; \
     if (!handle) \
     { \
-      handle = malloc(sizeof(csh)); \
+      handle = (csh*)malloc(sizeof(csh)); \
       if (cs_open(CS_ARCH_X86, CS_MODE_##MODE, handle) != CS_ERR_OK) \
         printf("capstone opening failed\n"); \
       cs_option(*handle, CS_OPT_SYNTAX, CS_OPT_SYNTAX_ATT); \
@@ -22,12 +23,12 @@ get_dissambler(32)
 void disas(csh handle, void *beg, void *end, size_t max_inst)
 {
    cs_insn* insn;
-   size_t count = cs_disasm(handle, beg, (uintptr_t)end - (uintptr_t)beg,
+   size_t count = cs_disasm(handle, (const uint8_t*)beg, (uintptr_t)end - (uintptr_t)beg,
                           0x1000, 0, &insn);
    size_t j;
    for (j = 0; j < count && j < max_inst; j++)
    {
-     printf("0x%"PRIx64":\t%s\t\t%s\n", insn[j].address, insn[j].mnemonic,
+     printf("0x%" PRIx64 ":\t%s\t\t%s\n", insn[j].address, insn[j].mnemonic,
      insn[j].op_str);
    }
    cs_free(insn, count);

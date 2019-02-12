@@ -1,5 +1,5 @@
-CC=gcc
-CFLAGS=-Werror -Wextra -std=c99 -Wall -g
+CC=g++
+CFLAGS=-Werror -Wextra -std=c++17 -Wall -g
 LDFLAGS=-lcapstone
 VPATH=src
 OBJS=main.o debug.o serial.o

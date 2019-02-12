@@ -1,5 +1,4 @@
 #define _POSIX_C_SOURCE 200809L
-#define _GNU_SOURCE
 #include <asm/processor-flags.h>
 #include <asm/bootparam.h>
 #include <err.h>
@@ -16,11 +15,12 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <getopt.h>
+#include <string>
 
 #include "debug.h"
 #include "serial.h"
 #include "constant.h"
-static char *cmdline = NULL;
+static std::string cmdline;
 
 void main_loop(int vcpufd, struct kvm_run *run, char *begin_addr_space) {
   struct kvm_regs regs;
@@ -129,7 +129,7 @@ static void write_boot_param(struct setup_header *setup_header, void *end_setup_
 
   //setup kernel Command Line
   bt_param->hdr.cmd_line_ptr = CMDLINE_ADDR;
-  memcpy(ram_addr + CMDLINE_ADDR, cmdline, strlen(cmdline));
+  memcpy(ram_addr + CMDLINE_ADDR, cmdline.c_str(), cmdline.size());
 }
 
 static void *setup_memory(int vmfd, size_t ram_size)
@@ -139,12 +139,12 @@ static void *setup_memory(int vmfd, size_t ram_size)
   {
     errx(1, "mmap failed");
   }
-  struct kvm_userspace_memory_region region = {
-    .slot = 0,
-    .guest_phys_addr = 0x0,
-    .memory_size = RAM_SIZE,
-    .userspace_addr = (uint64_t)ram,
-  };
+  struct kvm_userspace_memory_region region; 
+  memset(&region, 0, sizeof(struct kvm_userspace_memory_region));
+  region.slot = 0;
+  region.guest_phys_addr = 0x0;
+  region.memory_size = RAM_SIZE;
+  region.userspace_addr = (uint64_t)ram;
   int ret = ioctl(vmfd, KVM_SET_USER_MEMORY_REGION, &region);
   if (ret == -1)
     err(1, "KVM_SET_USER_MEMORY_REGION");
@@ -162,7 +162,7 @@ static void *load_bzImage(const char *image, int vmfd, size_t *kernel_size,
   fstat(imagefd, &statbuf);
   size_t image_size = statbuf.st_size;
 
-  uint8_t *mem = mmap(NULL, image_size, PROT_READ | PROT_WRITE, MAP_SHARED, imagefd,
+  uint8_t *mem = (uint8_t*)mmap(NULL, image_size, PROT_READ | PROT_WRITE, MAP_SHARED, imagefd,
       0);
   if (mem == MAP_FAILED)
   {
@@ -175,7 +175,7 @@ static void *load_bzImage(const char *image, int vmfd, size_t *kernel_size,
   uint64_t off_kernel = get_kernel_off(setup_header);
 
   
-  char *ram_addr = setup_memory(vmfd, ram_size);
+  char *ram_addr = (char*)setup_memory(vmfd, ram_size);
   void *end_setup_header = mem + 0x0202 +  *((char*)mem + 0x0201);
   write_boot_param(setup_header, end_setup_header, ram_addr);
   //write kernel
@@ -187,18 +187,17 @@ static void *load_bzImage(const char *image, int vmfd, size_t *kernel_size,
 
 static void setup_protected_mode(struct kvm_sregs *sregs)
 {
-  struct kvm_segment seg = {
-    .base = 0,
-    .limit = 0xffffffff,
-    .selector = 0x8,
-    .present = 1,
-    .type = 11, 
-    .dpl = 0,
-    .db = 1,
-    .s = 1,
-    .l = 0,
-    .g = 1,
-  };
+  struct kvm_segment seg;
+  seg.base = 0;
+  seg.limit = 0xffffffff;
+  seg.selector = 0x8;
+  seg.present = 1;
+  seg.type = 11;
+  seg.dpl = 0;
+  seg.db = 1;
+  seg.s = 1;
+  seg.l = 0;
+  seg.g = 1;
 
   sregs->cs = seg;
 
@@ -286,7 +285,7 @@ static void load_initramfs(char *initramfs, uint8_t *ram_begin, size_t kernel_si
   fstat(imagefd, &statbuf);
   size_t image_size = statbuf.st_size;
 
-  uint8_t *init = mmap(NULL, image_size, PROT_READ | PROT_WRITE, MAP_SHARED, imagefd,
+  uint8_t *init = (uint8_t*)mmap(NULL, image_size, PROT_READ | PROT_WRITE, MAP_SHARED, imagefd,
       0);
   if (init == MAP_FAILED)
     errx(1, "load image failed");
@@ -350,7 +349,7 @@ void parse_param(int argc, char **argv, char **bzimage_path,
     *bzimage_path = argv[optind++];
     for (;optind < argc; optind++)
     {
-      asprintf(&cmdline, "%s %s", cmdline, argv[optind]);
+      cmdline += std::string(argv[optind]);
     }
   }
   *initrd_path = initrd;
@@ -389,14 +388,14 @@ int main(int argc, char **argv) {
   if (mmap_size < sizeof(*run))
     errx(1, "KVM_GET_VCPU_MMAP_SIZE unexpectedly small");
 
-  run = mmap(NULL, mmap_size, PROT_READ | PROT_WRITE, MAP_SHARED, vcpufd, 0);
+  run = (kvm_run*)mmap(NULL, mmap_size, PROT_READ | PROT_WRITE, MAP_SHARED, vcpufd, 0);
   if (!run)
     err(1, "mmap vcpu");
 
   size_t kernel_size;
   void *ram_addr = load_bzImage(bzimage_path, vmfd, &kernel_size, ram_size);
   if (initrd_path != NULL)
-    load_initramfs(initrd_path, ram_addr, kernel_size);
+    load_initramfs(initrd_path, (uint8_t*)ram_addr, kernel_size);
 
   ret = ioctl(vcpufd, KVM_GET_SREGS, &sregs);
   if (ret == -1)
@@ -408,17 +407,17 @@ int main(int argc, char **argv) {
   if (ret == -1)
     err(1, "KVM_SET_SREGS");
 
-  struct kvm_regs regs = {
-    .rip = KERNEL_START,
-    .rsp = STACK_ADRR,
-    .rsi = BOOT_PARAM_ADDR,
-    .rbp = 0,
-    .rdi = 0,
-    .rbx = 0,
-  };
+  struct kvm_regs regs;
+  memset(&regs, 0, sizeof(regs));
+  regs.rip = KERNEL_START;
+  regs.rsp = STACK_ADRR;
+  regs.rsi = BOOT_PARAM_ADDR;
+  regs.rbp = 0;
+  regs.rdi = 0;
+  regs.rbx = 0;
   ret = ioctl(vcpufd, KVM_SET_REGS, &regs);
 
   activate_single_step(vcpufd);
 
-  main_loop(vcpufd, run, ram_addr);
+  main_loop(vcpufd, run, (char*)ram_addr);
 }
