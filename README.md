@@ -27,7 +27,7 @@ It will create a binary called my-kvm
 Launch it:
 
 ```
-./mygdb -m $size-ram --initrd $initrd bzImage opt=value ...
+./mykvm -m $size-ram --initrd $initrd bzImage opt=value ...
 ```
 
 -m Set the size of the Vm's RAM it is optional the default size is 1 << 30
